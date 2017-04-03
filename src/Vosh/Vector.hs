@@ -91,7 +91,7 @@ conj = zipWith (&&)
 
 -- | `if_else` of `Vec`s
 ife :: BDD -> Vec -> Vec -> Vec
-ife cond as bs = disj (map (cond &&) as) (map (not cond &&) bs)
+ife cond as bs = conj (map (cond ==>) as) (map (not cond ==>) bs)
 
 -- | Is a `Vec` representing a number
 -- even?

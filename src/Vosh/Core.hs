@@ -4,6 +4,7 @@ module Vosh.Core where
 import qualified Cudd.Imperative as IMP
 import           Cudd.Cudd
 import           Cudd.Convert
+import           Cudd.Reorder
 
 import           System.IO
 import           System.Process
@@ -51,22 +52,25 @@ v i = BDD $ \m -> ithVar m i
 exists :: BDD -> BDD -> BDD
 exists = flip $ binary bExists
 
--- | Existential quantification over a list of BDDs
-existsMany :: [BDD] -> BDD -> BDD
-existsMany = flip $ foldl exists
+-- | Existential quantification over a list of variables
+existsMany :: [Int] -> BDD -> BDD
+existsMany vars = exists (BDD $ \m -> indicesToCube m vars)
 
 -- | Universal quantification
 forall :: BDD -> BDD -> BDD
 forall = flip $ binary bForall
 
 -- | Substitute a variable for a BDD
-substitute :: (Int, BDD) -> BDD -> BDD
-substitute (idx, bdd') bdd =
-  BDD $ \m -> runST $ do
-    let impM = toImperativeManager m
-    impbdd  <- toImperativeNode (runBDD bdd m)
-    impbdd' <- toImperativeNode (runBDD bdd' m)
-    fromImperativeNode m <$> IMP.compose impM impbdd impbdd' idx
+substitute :: [(Int, BDD)] -> BDD -> BDD
+substitute = flip $ foldl go
+  where
+    go :: BDD -> (Int, BDD) -> BDD
+    go bdd (idx, bdd') =
+      BDD $ \m -> runST $ do
+        let impM = toImperativeManager m
+        impbdd  <- toImperativeNode (runBDD bdd m)
+        impbdd' <- toImperativeNode (runBDD bdd' m)
+        fromImperativeNode m <$> IMP.compose impM impbdd impbdd' idx
 
 -- | Evaluate a BDD expression
 evaluate :: DDManager -> BDD -> [Bool] -> Bool
@@ -86,3 +90,13 @@ defaults = cuddInit
 -- | New names for `DDManager`s
 ordered :: [Int] -> DDManager
 ordered = cuddInitOrder
+
+-- | This instance is missing from cudd 
+instance Show SatBit where
+  show Zero     = "0"
+  show One      = "1"
+  show DontCare = "-"
+
+-- | Find everything that satisfies a BDD
+sats :: DDManager -> BDD -> [[SatBit]]
+sats m bdd = allSat m (runBDD bdd m) 
