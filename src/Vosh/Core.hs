@@ -1,95 +1,119 @@
-{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE NoImplicitPrelude, ExistentialQuantification, RankNTypes #-}
 module Vosh.Core where
 
-import qualified Cudd.Imperative as IMP
-import           Cudd.Cudd
-import           Cudd.Convert
-import           Cudd.Reorder
+import Cudd.Imperative
+import Cudd.Convert
+import Cudd.Reorder
+import qualified Cudd.Cudd as Cudd
 
-import           System.IO
-import           System.Process
+import System.IO
+import System.Process
 
-import           Control.Monad
-import           Control.Monad.ST
+import Control.Monad
+import Control.Monad.ST
 
-import           Data.Bool (Bool, otherwise)
-import           Data.Int
-import           Data.List
+import Data.Bool (Bool, otherwise)
+import Data.Int
+import Data.List
 
-import           Vosh.Class
-import           Vosh.Prelude
+import Vosh.Class
+import Vosh.Prelude
 
 -- | Binary Decision Diagrams
-newtype BDD = BDD { runBDD :: DDManager -> DDNode }
+data BDDInternal s u = BDDInternal { runBDDInternal :: DDManager s u -> Node s u }
+
+data BDD = forall s. BDD (BDDInternal s ())
+
+-- | Nodes in the BDDInternal
+type Node s u = ST s (DDNode s u)
 
 -- | Embed a nullary operation from `CUDD`
-nullary :: (DDManager -> DDNode) -> BDD
-nullary = BDD
+nullary :: (DDManager s u -> Node s u) -> BDDInternal s u
+nullary op = BDDInternal $ \m -> op m
 
 -- | Embed a unary operation from `CUDD`
-unary :: (DDManager -> DDNode -> DDNode) -> BDD -> BDD
-unary foo bdd = BDD $ \m -> foo m (runBDD bdd m)
+unary :: (DDManager s u -> DDNode s u -> Node s u) -> BDDInternal s u -> BDDInternal s u
+unary op l = BDDInternal $ \m -> join (op m <$> (runBDDInternal l m))
 
 -- | Embed a binary operation from `CUDD`
-binary :: (DDManager -> DDNode -> DDNode -> DDNode) -> BDD -> BDD -> BDD
-binary op f g = BDD $ \m -> op m (runBDD f m) (runBDD g m)
+binary :: (DDManager s u -> DDNode s u -> DDNode s u -> Node s u) -> BDDInternal s u -> BDDInternal s u -> BDDInternal s u
+binary op l r = BDDInternal $ \m -> join (op m <$> runBDDInternal l m <*> runBDDInternal r m)
 
--- | BDDs are Booleans
+-- | BDDInternals are Booleans
+instance Boolean (BDDInternal s u) where
+  true    = nullary (return . bOne)
+  false   = nullary (return . bZero)
+  (&&)    = binary  bAnd
+  (||)    = binary  bOr
+  not bdd = BDDInternal $ \m -> bNot <$> runBDDInternal bdd m
+  xor     = binary  bXor
+  xnor    = binary  bXnor
+
+-- | BDD's are Booleans
 instance Boolean BDD where
-  true  = nullary readOne 
-  false = nullary readLogicZero
-  (&&)  = binary  bAnd
-  (||)  = binary  bOr
-  not   = unary   bNot
-  xor   = binary  bXor
-  xnor  = binary  bXnor
+  true  = BDD true
+  false = BDD false
+  (&&)  = \(BDD l) (BDD r) -> BDD $ l && r
+  (||)  = \(BDD l) (BDD r) -> BDD $ l || r
+  not   = undefined
+  xor   = undefined
+  xnor  = undefined 
 
--- | Create a BDD variable
+-- | Create a BDDInternal variable
 v :: Int -> BDD
-v i = BDD $ \m -> ithVar m i
+v i = BDD $ BDDInternal $ \m -> ithVar m i
 
 -- | Existential quantification
-exists :: BDD -> BDD -> BDD
+exists :: BDDInternal s u -> BDDInternal s u -> BDDInternal s u
 exists = flip $ binary bExists
 
 -- | Existential quantification over a list of variables
-existsMany :: [Int] -> BDD -> BDD
-existsMany vars = exists (BDD $ \m -> indicesToCube m vars)
+existsMany :: [Int] -> BDDInternal s u -> BDDInternal s u
+existsMany vars = exists (BDDInternal $ \m -> indicesToCube m vars)
 
 -- | Universal quantification
-forall :: BDD -> BDD -> BDD
+forall :: BDDInternal s u -> BDDInternal s u -> BDDInternal s u
 forall = flip $ binary bForall
 
--- | Substitute a variable for a BDD
-substitute :: [(Int, BDD)] -> BDD -> BDD
+-- | Substitute a variable for a BDDInternal
+substitute :: [(Int, BDDInternal s u)] -> BDDInternal s u -> BDDInternal s u
 substitute = flip $ foldl go
   where
-    go :: BDD -> (Int, BDD) -> BDD
+    go :: BDDInternal s u -> (Int, BDDInternal s u) -> BDDInternal s u
     go bdd (idx, bdd') =
-      BDD $ \m -> runST $ do
-        let impM = toImperativeManager m
-        impbdd  <- toImperativeNode (runBDD bdd m)
-        impbdd' <- toImperativeNode (runBDD bdd' m)
-        fromImperativeNode m <$> IMP.compose impM impbdd impbdd' idx
+      BDDInternal $ \m -> do
+        impbdd  <- runBDDInternal bdd m
+        impbdd' <- runBDDInternal bdd' m
+        compose m impbdd impbdd' idx
 
--- | Evaluate a BDD expression
-evaluate :: DDManager -> BDD -> [Bool] -> Bool
-evaluate m bdd ass = eval m (runBDD bdd m) [ if a then 1 else 0 | a <- ass]
+{-
+-- | Evaluate a BDDInternal expression
+evaluate :: Manager -> BDDInternal -> [Bool] -> Bool
+evaluate m bdd ass = eval m (runBDDInternal bdd m) [ if a then 1 else 0 | a <- ass]
+-}
 
--- | Display a BDD
+
+-- | Display a BDDInternal
 -- TODO: Use `dumpDot'` to avoid an intermidiary file
-display :: DDManager -> BDD -> IO ()
-display m bdd = do
-  dumpDot m (runBDD bdd m) "/tmp/graph.dot"
+display :: (forall s. ST s (DDManager s u)) -> (forall s. BDDInternal s u) -> IO ()
+display stm bdd = do
+  (m', bdd') <- return $ runST $ do
+    m       <- stm
+    bdd'    <- runBDDInternal bdd m
+    return (fromImperativeManager m, fromImperativeNode (fromImperativeManager m) bdd')
+  Cudd.dumpDot m' bdd' "/tmp/graph.dot"
   callCommand "dot -Txlib /tmp/graph.dot"
 
 -- | New names for `DDManager`s
-defaults :: DDManager
-defaults = cuddInit
+defaults :: ST s (DDManager s u)
+defaults = cuddInitDefaults
 
 -- | New names for `DDManager`s
-ordered :: [Int] -> DDManager
-ordered = cuddInitOrder
+ordered :: [Int] -> ST s (DDManager s u)
+ordered ord = do
+  manager <- defaults
+  shuffleHeap manager ord
+  return manager
 
 -- | This instance is missing from cudd 
 instance Show SatBit where
@@ -97,6 +121,8 @@ instance Show SatBit where
   show One      = "1"
   show DontCare = "-"
 
--- | Find everything that satisfies a BDD
-sats :: DDManager -> BDD -> [[SatBit]]
-sats m bdd = allSat m (runBDD bdd m) 
+{-
+-- | Find everything that satisfies a BDDInternal
+sats :: DDManager s u -> BDDInternal -> [[SatBit]]
+sats m bdd = allSat m (runBDDInternal bdd m) 
+-}

@@ -19,6 +19,7 @@ module Vosh.Prelude ( ($)
                     , print
                     , interleave
                     , reverse
+                    , undefined
                     ) where
 
 import Prelude
