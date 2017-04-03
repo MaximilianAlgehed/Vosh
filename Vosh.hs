@@ -7,14 +7,15 @@ import System.Process
 
 import qualified Prelude   as P
 import qualified Data.Bool as Bool
-import           Prelude   (($), (.))
+import           Prelude   (($), (.), flip)
 import           Data.Bool (Bool, otherwise)
 import           Data.Int
 import           Data.List
 
-
+-- | Binary Decision Diagrams
 newtype BDD = BDD { runBDD :: DDManager -> DDNode }
 
+-- | Relevant operations on booleans
 class Boolean a where
   true, false :: a
   false = not true
@@ -29,18 +30,26 @@ class Boolean a where
   (==>) :: a -> a -> a
   a ==> b = (not a) || b
 
+-- | Make sure `Boolean` operations
+-- have the same fixity as the operations
+-- from `Data.Bool`
 infixr 3 &&
 infixr 2 ||
+infixr 1 ==>
 
+-- | Embed a nullary operation from `CUDD`
 nullary :: (DDManager -> DDNode) -> BDD
 nullary = BDD
 
+-- | Embed a unary operation from `CUDD`
 unary :: (DDManager -> DDNode -> DDNode) -> BDD -> BDD
 unary foo bdd = BDD $ \m -> foo m (runBDD bdd m)
 
+-- | Embed a binary operation from `CUDD`
 binary :: (DDManager -> DDNode -> DDNode -> DDNode) -> BDD -> BDD -> BDD
 binary op f g = BDD $ \m -> op m (runBDD f m) (runBDD g m)
 
+-- | BDDs are Booleans
 instance Boolean BDD where
   true  = nullary readOne 
   false = nullary readLogicZero
@@ -50,6 +59,7 @@ instance Boolean BDD where
   xor   = binary  bXor
   xnor  = binary  bXnor
 
+-- | Bools are Booleans
 instance Boolean Bool where
   true  = Bool.True
   false = Bool.False
@@ -60,6 +70,14 @@ instance Boolean Bool where
 -- | Create a BDD variable
 v :: Int -> BDD
 v i = BDD $ \m -> ithVar m i
+
+-- | Existential quantification
+exists :: BDD -> BDD -> BDD
+exists = flip $ binary bExists
+
+-- | Universal quantification
+forall :: BDD -> BDD -> BDD
+forall = flip $ binary bForall
 
 -- | Evaluate a BDD expression
 evaluate :: DDManager -> BDD -> [Bool] -> Bool
